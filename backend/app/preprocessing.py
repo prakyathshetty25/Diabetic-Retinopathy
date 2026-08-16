@@ -140,3 +140,104 @@ def prepare_tensor_from_image(image: Union[np.ndarray, Image.Image]) -> Tuple[to
     transforms = get_inference_transforms()
     tensor = transforms(pil_img).unsqueeze(0)  # Shape: [1, 3, 512, 512]
     return tensor, preprocessed_np
+
+
+def extract_retinal_lesion_features(image: Union[np.ndarray, Image.Image]) -> dict:
+    """
+    Extracts computer vision clinical lesion indicators from preprocessed retinal fundus image:
+    1. Microaneurysms (tiny dark red spots)
+    2. Hard Exudates (bright yellow waxy deposits)
+    3. Cotton Wool Spots (soft fluffy white lesions)
+    4. Blot Hemorrhages (larger dark red blotches)
+    5. Neovascularization / Preretinal Hemorrhage indicators
+    """
+    if isinstance(image, Image.Image):
+        img_np = np.array(image.convert("RGB"))
+    elif isinstance(image, np.ndarray):
+        img_np = image
+    else:
+        raise TypeError(f"Unsupported image type: {type(image)}")
+
+    h, w, _ = img_np.shape
+
+    # 1. Circular Mask (exclude black border around fundus)
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    _, fundus_mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+
+    # 2. Extract Red Lesions (Microaneurysms & Hemorrhages)
+    g_channel = img_np[:, :, 1]
+    r_channel = img_np[:, :, 0]
+
+    red_diff = cv2.subtract(r_channel, g_channel)
+    red_diff = cv2.bitwise_and(red_diff, fundus_mask)
+
+    _, dark_red_mask = cv2.threshold(red_diff, 45, 255, cv2.THRESH_BINARY)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dark_red_mask)
+
+    microaneurysm_count = 0
+    hemorrhage_count = 0
+
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if 3 <= area <= 35:
+            microaneurysm_count += 1
+        elif 36 <= area <= 350:
+            hemorrhage_count += 1
+
+    # 3. Extract Yellow Exudates & White Cotton Wool Spots
+    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+    lower_yellow = np.array([10, 50, 160])
+    upper_yellow = np.array([45, 255, 255])
+    yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+    yellow_mask = cv2.bitwise_and(yellow_mask, fundus_mask)
+
+    num_ex_labels, _, ex_stats, _ = cv2.connectedComponentsWithStats(yellow_mask)
+    exudate_count = 0
+    for i in range(1, num_ex_labels):
+        area = ex_stats[i, cv2.CC_STAT_AREA]
+        if 4 <= area <= 400:
+            exudate_count += 1
+
+    lower_white = np.array([0, 0, 190])
+    upper_white = np.array([180, 50, 255])
+    white_mask = cv2.inRange(hsv, lower_white, upper_white)
+    white_mask = cv2.bitwise_and(white_mask, fundus_mask)
+
+    num_cw_labels, _, cw_stats, _ = cv2.connectedComponentsWithStats(white_mask)
+    cotton_wool_count = 0
+    for i in range(1, num_cw_labels):
+        area = cw_stats[i, cv2.CC_STAT_AREA]
+        if 15 <= area <= 500:
+            cotton_wool_count += 1
+
+    # 4. Proliferative / Neovascularization score
+    lower_dark_red = np.array([0, 100, 20])
+    upper_dark_red = np.array([10, 255, 120])
+    preretinal_mask = cv2.inRange(hsv, lower_dark_red, upper_dark_red)
+    preretinal_mask = cv2.bitwise_and(preretinal_mask, fundus_mask)
+    preretinal_area = cv2.countNonZero(preretinal_mask)
+
+    neovascular_score = float(preretinal_area) / float(w * h)
+
+    # Determine suggested grade from clinical rules (ICDR guidelines)
+    if neovascular_score > 0.0015:
+        suggested_grade = 4
+    elif hemorrhage_count >= 15:
+        suggested_grade = 3
+    elif exudate_count >= 5 or cotton_wool_count >= 2:
+        suggested_grade = 2
+    elif microaneurysm_count >= 2:
+        suggested_grade = 1
+    else:
+        suggested_grade = 0
+
+    return {
+        "microaneurysm_count": microaneurysm_count,
+        "hemorrhage_count": hemorrhage_count,
+        "exudate_count": exudate_count,
+        "cotton_wool_count": cotton_wool_count,
+        "neovascular_score": round(neovascular_score, 5),
+        "suggested_grade": suggested_grade
+    }
+

@@ -8,6 +8,7 @@ Backbone: ResNet50 / EfficientNet / MobileNetV2 fine-tuned for 5-class DR Severi
 4: Proliferative DR
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ from typing import Dict, Tuple, Any, Optional
 import logging
 
 from app.config import NUM_CLASSES, DR_CLASSES, DEFAULT_BACKBONE
+from app.preprocessing import extract_retinal_lesion_features
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +75,26 @@ class DRInferenceEngine:
         
         self.model = RetinalDRClassifier(backbone_name=backbone_name, pretrained=True)
         
+        if weights_path is None:
+            default_weights = os.path.abspath(os.path.join(os.path.dirname(__file__), "weights", "dr_resnet50_weights.pth"))
+            if os.path.exists(default_weights):
+                weights_path = default_weights
+
         if weights_path:
             try:
                 state_dict = torch.load(weights_path, map_location=self.device)
                 self.model.load_state_dict(state_dict)
-                logger.info(f"Loaded custom weights from {weights_path}")
+                logger.info(f"Loaded custom DR weights from {weights_path}")
             except Exception as e:
-                logger.error(f"Failed to load weights from {weights_path}, using pre-trained weights: {e}")
+                logger.error(f"Failed to load weights from {weights_path}, using default backbone: {e}")
 
         self.model.to(self.device)
         self.model.eval()
 
-    def predict(self, input_tensor: torch.Tensor) -> Dict[str, Any]:
+    def predict(self, input_tensor: torch.Tensor, raw_rgb_image: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Executes model forward pass and returns predicted DR grade, confidence, and class probabilities.
+        Optionally integrates CV lesion feature indicators if raw_rgb_image is provided.
         """
         if not isinstance(input_tensor, torch.Tensor):
             raise TypeError("Input must be a PyTorch Tensor.")
@@ -98,13 +106,32 @@ class DRInferenceEngine:
 
         with torch.no_grad():
             logits = self.model(input_tensor)
-            probabilities = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+            nn_probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
 
-        pred_class_id = int(np.argmax(probabilities))
-        confidence = float(probabilities[pred_class_id])
+        lesion_metrics = None
+        final_probs = nn_probs.copy()
+
+        if raw_rgb_image is not None:
+            try:
+                lesion_metrics = extract_retinal_lesion_features(raw_rgb_image)
+                s_grade = lesion_metrics.get("suggested_grade", None)
+                if s_grade is not None:
+                    # Construct a clinical lesion feature distribution
+                    lesion_prob = np.full(NUM_CLASSES, 0.05)
+                    lesion_prob[s_grade] = 0.80
+                    lesion_prob = lesion_prob / lesion_prob.sum()
+
+                    # Hybrid fusion: 75% Deep Learning + 25% Lesion Feature Rules
+                    final_probs = 0.75 * nn_probs + 0.25 * lesion_prob
+                    final_probs = final_probs / final_probs.sum()
+            except Exception as e:
+                logger.warning(f"Lesion feature extraction error: {e}")
+
+        pred_class_id = int(np.argmax(final_probs))
+        confidence = float(final_probs[pred_class_id])
 
         class_probabilities = {
-            DR_CLASSES[i]: float(prob) for i, prob in enumerate(probabilities)
+            DR_CLASSES[i]: float(prob) for i, prob in enumerate(final_probs)
         }
 
         return {
@@ -113,5 +140,7 @@ class DRInferenceEngine:
             "confidence": confidence,
             "probabilities": class_probabilities,
             "raw_logits": logits.squeeze(0).cpu().numpy().tolist(),
+            "lesion_metrics": lesion_metrics,
             "device": str(self.device)
         }
+

@@ -139,7 +139,7 @@ async def predict_retinal_scan(
         tensor, preprocessed_np = prepare_tensor_from_image(pil_image)
 
         # 2. PyTorch Model Prediction
-        pred_result = engine.predict(tensor)
+        pred_result = engine.predict(tensor, raw_rgb_image=preprocessed_np)
         pred_grade = pred_result["predicted_class_id"]
         confidence = pred_result["confidence"]
         probabilities = pred_result["probabilities"]
