@@ -117,6 +117,7 @@ async def predict_retinal_scan(
     if file is not None:
         try:
             contents = await file.read()
+            print(f"[API Endpoint] Received file: {file.filename}, Bytes read: {len(contents)}")
             pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid or corrupt image file: {str(e)}")
@@ -125,6 +126,7 @@ async def predict_retinal_scan(
             if "," in image_base64:
                 image_base64 = image_base64.split(",")[1]
             image_bytes = base64.b64decode(image_base64)
+            print(f"[API Endpoint] Received Base64 payload, Bytes decoded: {len(image_bytes)}")
             pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
@@ -137,6 +139,7 @@ async def predict_retinal_scan(
     try:
         # 1. Preprocessing and PyTorch tensor preparation
         tensor, preprocessed_np = prepare_tensor_from_image(pil_image)
+        print(f"[API Endpoint] Dynamically Generated Tensor Mean: {tensor.mean().item():.5f}, Std: {tensor.std().item():.5f}")
 
         # 2. PyTorch Model Prediction
         pred_result = engine.predict(tensor, raw_rgb_image=preprocessed_np)
@@ -167,6 +170,12 @@ async def predict_retinal_scan(
         heatmap_b64 = image_to_base64(Image.fromarray(heatmap_rgb))
 
         return {
+            "predicted_class_id": pred_result["predicted_class_id"],
+            "predicted_class_name": pred_result["predicted_class_name"],
+            "confidence_score": pred_result["confidence_score"],
+            "all_class_probabilities": pred_result["all_class_probabilities"],
+            "progression_risk": pred_result["progression_risk"],
+            "clinical_recommendation": pred_result["clinical_recommendation"],
             "patient_id": patient_id,
             "prediction": pred_result,
             "spatial_summary": spatial_summary,

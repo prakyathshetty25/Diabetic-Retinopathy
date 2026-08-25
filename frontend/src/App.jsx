@@ -188,7 +188,7 @@ export default function App() {
           {!isLoading && !error && predictionData && (
             <>
               <PredictionCard
-                prediction={predictionData.prediction}
+                prediction={predictionData.prediction || predictionData}
                 spatialSummary={predictionData.spatial_summary}
               />
 

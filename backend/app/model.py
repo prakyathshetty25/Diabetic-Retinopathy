@@ -16,7 +16,7 @@ import torchvision.models as models
 from typing import Dict, Tuple, Any, Optional
 import logging
 
-from app.config import NUM_CLASSES, DR_CLASSES, DEFAULT_BACKBONE
+from app.config import NUM_CLASSES, DR_CLASSES, DR_PROGRESSION_RISK, DR_CLINICAL_RECOMMENDATIONS, DEFAULT_BACKBONE
 from app.preprocessing import extract_retinal_lesion_features
 
 logger = logging.getLogger(__name__)
@@ -104,43 +104,63 @@ class DRInferenceEngine:
 
         input_tensor = input_tensor.to(self.device)
 
+        self.model.eval()
         with torch.no_grad():
             logits = self.model(input_tensor)
             nn_probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
 
-        lesion_metrics = None
+        # Pure Deep Learning model probabilities without heuristic overriding
         final_probs = nn_probs.copy()
+        pred_class_id = int(np.argmax(final_probs))
+        confidence = float(final_probs[pred_class_id])
 
+        lesion_metrics = None
         if raw_rgb_image is not None:
             try:
                 lesion_metrics = extract_retinal_lesion_features(raw_rgb_image)
-                s_grade = lesion_metrics.get("suggested_grade", None)
-                if s_grade is not None:
-                    # Construct a clinical lesion feature distribution
-                    lesion_prob = np.full(NUM_CLASSES, 0.05)
-                    lesion_prob[s_grade] = 0.80
-                    lesion_prob = lesion_prob / lesion_prob.sum()
-
-                    # Hybrid fusion: 75% Deep Learning + 25% Lesion Feature Rules
-                    final_probs = 0.75 * nn_probs + 0.25 * lesion_prob
-                    final_probs = final_probs / final_probs.sum()
             except Exception as e:
                 logger.warning(f"Lesion feature extraction error: {e}")
 
-        pred_class_id = int(np.argmax(final_probs))
-        confidence = float(final_probs[pred_class_id])
+        raw_logits_list = logits.squeeze(0).cpu().numpy().tolist()
+
+        # Mandatory Dynamic Tensor & Output Console Debug Prints (Requirements 2 & 4)
+        tensor_mean = input_tensor.mean().item()
+        tensor_std = input_tensor.std().item()
+        print(f"Tensor Mean: {tensor_mean:.5f}, Tensor Std: {tensor_std:.5f}")
+        print(f"Input Image Shape: {input_tensor.shape}")
+        print(f"Input Tensor Min/Max: ({input_tensor.min().item():.3f}, {input_tensor.max().item():.3f})")
+        print("Raw Model Logits:", raw_logits_list)
+        print("Raw Logits/Probabilities:", final_probs.tolist())
+        print("Argmax Index:", pred_class_id)
+
+        # Logger Outputs
+        logger.info(f"--- ML MODEL INFERENCE DIAGNOSTICS ---")
+        logger.info(f"Input Image Shape: {input_tensor.shape} | Min/Max: ({input_tensor.min().item():.3f}, {input_tensor.max().item():.3f})")
+        logger.info(f"Raw Model Logits: {raw_logits_list}")
+        logger.info(f"Probabilities: {final_probs.tolist()}")
+        logger.info(f"Argmax Class Index: {pred_class_id}")
+        logger.info(f"Softmax Confidence Score: {confidence * 100:.2f}%")
+        logger.info(f"---------------------------------------")
 
         class_probabilities = {
             DR_CLASSES[i]: float(prob) for i, prob in enumerate(final_probs)
         }
 
+        progression_risk = DR_PROGRESSION_RISK.get(pred_class_id, "Unknown")
+        clinical_recommendation = DR_CLINICAL_RECOMMENDATIONS.get(pred_class_id, "Consult ophthalmologist.")
+
         return {
             "predicted_class_id": pred_class_id,
             "predicted_class_name": DR_CLASSES[pred_class_id],
             "confidence": confidence,
+            "confidence_score": confidence,
             "probabilities": class_probabilities,
-            "raw_logits": logits.squeeze(0).cpu().numpy().tolist(),
+            "all_class_probabilities": class_probabilities,
+            "progression_risk": progression_risk,
+            "clinical_recommendation": clinical_recommendation,
+            "raw_logits": raw_logits_list,
             "lesion_metrics": lesion_metrics,
             "device": str(self.device)
         }
+
 

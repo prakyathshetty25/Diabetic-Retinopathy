@@ -72,11 +72,32 @@ def apply_clahe(image: np.ndarray, clip_limit: float = 2.5, tile_grid_size: Tupl
     return enhanced_rgb
 
 
+def apply_green_channel_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)) -> np.ndarray:
+    """
+    Applies CLAHE on the Green channel of an RGB fundus image.
+    Retinal blood vessels and microaneurysms have peak spectral contrast in the green channel.
+    Re-stacks channels explicitly as [R, Enhanced_G, B].
+    """
+    if image is None or image.ndim != 3 or image.shape[2] != 3:
+        return image
+
+    r_channel = image[:, :, 0]
+    g_channel = image[:, :, 1]
+    b_channel = image[:, :, 2]
+
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    enhanced_g = clahe.apply(g_channel)
+
+    enhanced_rgb = np.stack([r_channel, enhanced_g, b_channel], axis=-1)
+    return enhanced_rgb
+
+
 def preprocess_fundus_image(
     image: Union[np.ndarray, Image.Image],
     target_size: Tuple[int, int] = IMAGE_SIZE,
     use_ben_graham: bool = True,
-    use_clahe: bool = True
+    use_clahe: bool = True,
+    use_green_clahe: bool = True
 ) -> Tuple[np.ndarray, Image.Image]:
     """
     Full fundus image preprocessing flow.
@@ -102,11 +123,13 @@ def preprocess_fundus_image(
         logger.warning(f"FOV cropping failed, using original: {e}")
         cropped = img_np
 
-    # 2. Resizing to standard dimensions
+    # 2. Resizing to standard dimensions (224x224 for backbone model)
     resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
 
-    # 3. CLAHE enhancement
-    if use_clahe:
+    # 3. CLAHE enhancement (Green channel preferred for microaneurysm contrast)
+    if use_green_clahe:
+        enhanced = apply_green_channel_clahe(resized)
+    elif use_clahe:
         enhanced = apply_clahe(resized)
     else:
         enhanced = resized
@@ -118,13 +141,16 @@ def preprocess_fundus_image(
     else:
         final_rgb = enhanced
 
-    pil_img = Image.fromarray(final_rgb)
-    return final_rgb, pil_img
+    # Ensure array is in [0, 255] uint8 range before PIL image conversion
+    final_rgb_uint8 = np.clip(final_rgb, 0, 255).astype(np.uint8)
+    pil_img = Image.fromarray(final_rgb_uint8)
+    return final_rgb_uint8, pil_img
 
 
 def get_inference_transforms():
     """
     Standard PyTorch normalization transform for preprocessed fundus images.
+    Transforms image to tensor normalized with ImageNet mean & std.
     """
     return T.Compose([
         T.ToTensor(),
@@ -132,14 +158,15 @@ def get_inference_transforms():
     ])
 
 
-def prepare_tensor_from_image(image: Union[np.ndarray, Image.Image]) -> Tuple[torch.Tensor, np.ndarray]:
+def prepare_tensor_from_image(image: Union[np.ndarray, Image.Image], target_size: Tuple[int, int] = IMAGE_SIZE) -> Tuple[torch.Tensor, np.ndarray]:
     """
     Preprocesses input image and transforms it into a PyTorch float tensor [1, 3, H, W].
     """
-    preprocessed_np, pil_img = preprocess_fundus_image(image)
+    preprocessed_np, pil_img = preprocess_fundus_image(image, target_size=target_size)
     transforms = get_inference_transforms()
-    tensor = transforms(pil_img).unsqueeze(0)  # Shape: [1, 3, 512, 512]
+    tensor = transforms(pil_img).unsqueeze(0)  # Shape: [1, 3, H, W]
     return tensor, preprocessed_np
+
 
 
 def extract_retinal_lesion_features(image: Union[np.ndarray, Image.Image]) -> dict:
