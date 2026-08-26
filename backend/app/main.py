@@ -18,10 +18,10 @@ from typing import Dict, Any, Optional, List
 import logging
 
 from app.config import DR_CLASSES, DR_DESCRIPTIONS, DR_SEVERITY_COLORS
-from app.preprocessing import prepare_tensor_from_image, preprocess_fundus_image
+from app.preprocessing import preprocess_image
 from app.model import DRInferenceEngine
-from app.gradcam import generate_gradcam_overlay
-from app.rag_engine import RAGClinicalReportGenerator, ICDR_KNOWLEDGE_BASE
+from app.gradcam import generate_gradcam, generate_gradcam_overlay
+from app.rag_engine import generate_clinical_report, RAGClinicalReportGenerator, ICDR_KNOWLEDGE_BASE
 from app.synthetic_data import create_synthetic_fundus, image_to_base64
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,7 @@ logger = logging.getLogger("RetinalScreeningAPI")
 
 app = FastAPI(
     title="Universal Retinal Screening API",
-    description="Deep Learning DR Detection, Grad-CAM XAI, and RAG Clinical Report Generator",
+    description="Deep Learning DR Detection with EfficientNet-B4, Grad-CAM XAI, and RAG Clinical Report Generator",
     version="1.0.0"
 )
 
@@ -58,6 +58,7 @@ class PredictBase64Request(BaseModel):
 
 
 @app.get("/api/health")
+@app.get("/health")
 def health_check():
     """System health check endpoint."""
     return {
@@ -70,6 +71,7 @@ def health_check():
 
 
 @app.get("/api/guidelines")
+@app.get("/guidelines")
 def get_icdr_guidelines():
     """Returns International Clinical Diabetic Retinopathy (ICDR) guidelines."""
     return {
@@ -80,6 +82,7 @@ def get_icdr_guidelines():
 
 
 @app.get("/api/samples")
+@app.get("/samples")
 def get_sample_fundus_scans():
     """
     Generates synthetic fundus scan samples for all 5 DR grades for instant clinical testing.
@@ -97,57 +100,58 @@ def get_sample_fundus_scans():
     return {"samples": samples}
 
 
-@app.post("/api/predict")
-async def predict_retinal_scan(
-    file: Optional[UploadFile] = File(None),
-    image_base64: Optional[str] = Form(None),
-    patient_id: Optional[str] = Form("PATIENT-1001")
+async def _process_prediction(
+    file: Optional[UploadFile] = None,
+    image_base64: Optional[str] = None,
+    patient_id: Optional[str] = "PATIENT-1001"
 ):
-    """
-    Primary Retinal Screening Analysis Endpoint.
-    Executes:
-    1. Input image validation & corrupt scan protection
-    2. Preprocessing & CLAHE contrast enhancement
-    3. Multi-Class DR Severity Inference (PyTorch)
-    4. Grad-CAM XAI spatial lesion map extraction
-    5. RAG Clinical Decision Report generation
-    """
-    pil_image = None
+    image_bytes = None
 
     if file is not None:
         try:
-            contents = await file.read()
-            print(f"[API Endpoint] Received file: {file.filename}, Bytes read: {len(contents)}")
-            pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
+            image_bytes = await file.read()
+            logger.info(f"[API Endpoint] Received uploaded file: {file.filename}, {len(image_bytes)} bytes")
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid or corrupt image file: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid image file upload: {str(e)}")
     elif image_base64:
         try:
             if "," in image_base64:
                 image_base64 = image_base64.split(",")[1]
             image_bytes = base64.b64decode(image_base64)
-            print(f"[API Endpoint] Received Base64 payload, Bytes decoded: {len(image_bytes)}")
-            pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            logger.info(f"[API Endpoint] Received Base64 image payload, {len(image_bytes)} decoded bytes")
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid Base64 image payload: {str(e)}")
     else:
         raise HTTPException(status_code=400, detail="Either image file or image_base64 string must be provided.")
 
-    if pil_image is None or pil_image.size[0] == 0 or pil_image.size[1] == 0:
-        raise HTTPException(status_code=400, detail="Corrupt image: zero dimension detected.")
+    if not image_bytes or len(image_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Corrupt or empty image data payload.")
 
     try:
-        # 1. Preprocessing and PyTorch tensor preparation
-        tensor, preprocessed_np = prepare_tensor_from_image(pil_image)
-        print(f"[API Endpoint] Dynamically Generated Tensor Mean: {tensor.mean().item():.5f}, Std: {tensor.std().item():.5f}")
+        # 1. Preprocessing pipeline converting explicitly to RGB, 384x384, CLAHE, ImageNet norm
+        tensor, preprocessed_np = preprocess_image(image_bytes)
+        print(f"[API Endpoint] Dynamically Generated Tensor Shape: {tensor.shape}")
+        print(f"[API Endpoint] Tensor Mean: {tensor.mean().item():.5f}, Tensor Std: {tensor.std().item():.5f}")
 
-        # 2. PyTorch Model Prediction
+        # 2. EfficientNet-B4 Model Prediction
         pred_result = engine.predict(tensor, raw_rgb_image=preprocessed_np)
         pred_grade = pred_result["predicted_class_id"]
-        confidence = pred_result["confidence"]
-        probabilities = pred_result["probabilities"]
+        class_name = pred_result["predicted_class_name"]
+        confidence_pct = float(pred_result["confidence_percentage"])
+        raw_logits = pred_result["raw_logits"]
 
-        # 3. Grad-CAM Heatmap Extraction & Overlay
+        print(f"[API Endpoint] Raw Model Logits: {raw_logits}")
+        print(f"[API Endpoint] Predicted Class: {pred_grade} ({class_name}), Confidence: {confidence_pct}%")
+
+        # 3. Grad-CAM XAI spatial lesion map extraction
+        gradcam_b64 = generate_gradcam(
+            input_tensor=tensor,
+            original_image=preprocessed_np,
+            predicted_class=pred_grade,
+            model=engine.model,
+            target_layer=engine.model.target_layer
+        )
+
         overlay_rgb, heatmap_rgb, spatial_summary = generate_gradcam_overlay(
             model=engine.model,
             target_layer=engine.model.target_layer,
@@ -156,37 +160,61 @@ async def predict_retinal_scan(
             target_class=pred_grade
         )
 
-        # 4. RAG Clinical Report Generation
-        clinical_report = rag_generator.generate_report(
-            predicted_grade=pred_grade,
-            confidence=confidence,
-            probabilities=probabilities,
+        # 4. RAG Clinical Decision Report generation
+        clinical_report = generate_clinical_report(
+            predicted_class_id=pred_grade,
+            confidence_score=confidence_pct,
+            probabilities=pred_result["probabilities"],
             spatial_summary=spatial_summary
         )
 
-        # Convert output images to Base64 for clean JSON response
+        # Base64 output images
         preprocessed_b64 = image_to_base64(Image.fromarray(preprocessed_np))
-        gradcam_overlay_b64 = image_to_base64(Image.fromarray(overlay_rgb))
         heatmap_b64 = image_to_base64(Image.fromarray(heatmap_rgb))
 
+        # 5. Expected API JSON structure + UI compatibility
         return {
-            "predicted_class_id": pred_result["predicted_class_id"],
-            "predicted_class_name": pred_result["predicted_class_name"],
-            "confidence_score": pred_result["confidence_score"],
-            "all_class_probabilities": pred_result["all_class_probabilities"],
+            "predicted_class_id": pred_grade,
+            "predicted_class_name": class_name,
+            "confidence_percentage": confidence_pct,
+            "gradcam_base64": gradcam_b64,
+            "clinical_report": clinical_report,
+            # Additional UI dashboard compatibility fields:
+            "confidence_score": pred_result["confidence"],
+            "all_class_probabilities": pred_result["probabilities"],
             "progression_risk": pred_result["progression_risk"],
             "clinical_recommendation": pred_result["clinical_recommendation"],
             "patient_id": patient_id,
             "prediction": pred_result,
             "spatial_summary": spatial_summary,
-            "clinical_report": clinical_report,
             "images": {
                 "preprocessed": preprocessed_b64,
-                "gradcam_overlay": gradcam_overlay_b64,
+                "gradcam_overlay": gradcam_b64,
                 "heatmap_only": heatmap_b64
             }
         }
 
     except Exception as e:
-        logger.error(f"Error processing screening request: {e}", exc_info=True)
+        logger.error(f"Error executing DR screening prediction pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal screening engine error: {str(e)}")
+
+
+@app.post("/predict")
+async def predict_endpoint(
+    file: Optional[UploadFile] = File(None),
+    image_base64: Optional[str] = Form(None),
+    patient_id: Optional[str] = Form("PATIENT-1001")
+):
+    """Retinal Screening Analysis Endpoint (/predict)."""
+    return await _process_prediction(file=file, image_base64=image_base64, patient_id=patient_id)
+
+
+@app.post("/api/predict")
+async def api_predict_endpoint(
+    file: Optional[UploadFile] = File(None),
+    image_base64: Optional[str] = Form(None),
+    patient_id: Optional[str] = Form("PATIENT-1001")
+):
+    """Retinal Screening Analysis Endpoint (/api/predict)."""
+    return await _process_prediction(file=file, image_base64=image_base64, patient_id=patient_id)
+

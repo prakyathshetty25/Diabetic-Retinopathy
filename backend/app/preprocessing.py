@@ -6,6 +6,7 @@ Fundus image preprocessing pipeline:
 - Cross-dataset standard PyTorch transformations (APTOS 2019 / EyePACS compatible)
 """
 
+import io
 import cv2
 import numpy as np
 from PIL import Image
@@ -92,6 +93,60 @@ def apply_green_channel_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_g
     return enhanced_rgb
 
 
+def preprocess_image(
+    image_bytes_or_img: Union[bytes, Image.Image, np.ndarray],
+    target_size: Tuple[int, int] = IMAGE_SIZE
+) -> Tuple[torch.Tensor, np.ndarray]:
+    """
+    Requirement 2 Preprocessing Pipeline:
+    - Explicitly converts uploaded image to RGB (Image.open(io.BytesIO(image_bytes)).convert('RGB')).
+    - Resizes to 384x384 (EfficientNet-B4 standard resolution).
+    - Applies OpenCV CLAHE to the green channel.
+    - Scales output to [0.0, 1.0] float before applying ImageNet normalization.
+    Returns:
+        (input_tensor [1, 3, H, W], preprocessed_np_rgb [H, W, 3])
+    """
+    if isinstance(image_bytes_or_img, bytes):
+        pil_image = Image.open(io.BytesIO(image_bytes_or_img)).convert("RGB")
+        img_np = np.array(pil_image)
+    elif isinstance(image_bytes_or_img, Image.Image):
+        pil_image = image_bytes_or_img.convert("RGB")
+        img_np = np.array(pil_image)
+    elif isinstance(image_bytes_or_img, np.ndarray):
+        img_np = image_bytes_or_img
+        if img_np.ndim == 2:
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
+        elif img_np.shape[2] == 4:
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
+    else:
+        raise TypeError(f"Unsupported image input type: {type(image_bytes_or_img)}")
+
+    # 1. Crop FOV if applicable
+    try:
+        cropped = crop_fundus_fov(img_np)
+    except Exception as e:
+        logger.warning(f"FOV cropping failed, using original: {e}")
+        cropped = img_np
+
+    # 2. Resize to target_size (384x384)
+    resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
+
+    # 3. Apply CLAHE on Green Channel
+    preprocessed_np = apply_green_channel_clahe(resized)
+
+    # 4. Scale to [0.0, 1.0] before applying ImageNet normalization
+    img_float = preprocessed_np.astype(np.float32) / 255.0
+
+    mean = np.array(IMAGENET_MEAN, dtype=np.float32).reshape(1, 1, 3)
+    std = np.array(IMAGENET_STD, dtype=np.float32).reshape(1, 1, 3)
+    normalized = (img_float - mean) / std
+
+    # Convert to PyTorch FloatTensor [1, 3, H, W]
+    tensor = torch.from_numpy(normalized).permute(2, 0, 1).unsqueeze(0).float()
+
+    return tensor, preprocessed_np
+
+
 def preprocess_fundus_image(
     image: Union[np.ndarray, Image.Image],
     target_size: Tuple[int, int] = IMAGE_SIZE,
@@ -104,68 +159,16 @@ def preprocess_fundus_image(
     Returns:
         (preprocessed_np_rgb, preprocessed_pil_image)
     """
-    if isinstance(image, Image.Image):
-        img_np = np.array(image.convert("RGB"))
-    elif isinstance(image, np.ndarray):
-        if image.ndim == 2:
-            img_np = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        elif image.shape[2] == 4:
-            img_np = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-        else:
-            img_np = image
-    else:
-        raise TypeError(f"Unsupported image type: {type(image)}")
-
-    # 1. FOV Cropping
-    try:
-        cropped = crop_fundus_fov(img_np)
-    except Exception as e:
-        logger.warning(f"FOV cropping failed, using original: {e}")
-        cropped = img_np
-
-    # 2. Resizing to standard dimensions (224x224 for backbone model)
-    resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
-
-    # 3. CLAHE enhancement (Green channel preferred for microaneurysm contrast)
-    if use_green_clahe:
-        enhanced = apply_green_channel_clahe(resized)
-    elif use_clahe:
-        enhanced = apply_clahe(resized)
-    else:
-        enhanced = resized
-
-    # 4. Optional Ben Graham enhancement blend for deep feature extraction
-    if use_ben_graham:
-        bg_enhanced = apply_ben_graham_enhancement(enhanced)
-        final_rgb = cv2.addWeighted(enhanced, 0.7, bg_enhanced, 0.3, 0)
-    else:
-        final_rgb = enhanced
-
-    # Ensure array is in [0, 255] uint8 range before PIL image conversion
-    final_rgb_uint8 = np.clip(final_rgb, 0, 255).astype(np.uint8)
-    pil_img = Image.fromarray(final_rgb_uint8)
-    return final_rgb_uint8, pil_img
+    tensor, np_rgb = preprocess_image(image, target_size=target_size)
+    pil_img = Image.fromarray(np_rgb)
+    return np_rgb, pil_img
 
 
-def get_inference_transforms():
-    """
-    Standard PyTorch normalization transform for preprocessed fundus images.
-    Transforms image to tensor normalized with ImageNet mean & std.
-    """
-    return T.Compose([
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    ])
-
-
-def prepare_tensor_from_image(image: Union[np.ndarray, Image.Image], target_size: Tuple[int, int] = IMAGE_SIZE) -> Tuple[torch.Tensor, np.ndarray]:
+def prepare_tensor_from_image(image: Union[bytes, np.ndarray, Image.Image], target_size: Tuple[int, int] = IMAGE_SIZE) -> Tuple[torch.Tensor, np.ndarray]:
     """
     Preprocesses input image and transforms it into a PyTorch float tensor [1, 3, H, W].
     """
-    preprocessed_np, pil_img = preprocess_fundus_image(image, target_size=target_size)
-    transforms = get_inference_transforms()
-    tensor = transforms(pil_img).unsqueeze(0)  # Shape: [1, 3, H, W]
-    return tensor, preprocessed_np
+    return preprocess_image(image, target_size=target_size)
 
 
 

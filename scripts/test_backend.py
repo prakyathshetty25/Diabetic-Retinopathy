@@ -4,19 +4,21 @@ Automated unit & integration verification script for Universal Retinal Screening
 
 import os
 import sys
+import io
+import asyncio
+import numpy as np
+from PIL import Image
 
 # Add backend directory to Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend")))
 
 import torch
-import numpy as np
-from PIL import Image
-
-from app.preprocessing import prepare_tensor_from_image
+from app.preprocessing import preprocess_image, prepare_tensor_from_image
 from app.model import DRInferenceEngine
-from app.gradcam import generate_gradcam_overlay
-from app.rag_engine import RAGClinicalReportGenerator
+from app.gradcam import generate_gradcam, generate_gradcam_overlay
+from app.rag_engine import generate_clinical_report, RAGClinicalReportGenerator
 from app.synthetic_data import create_synthetic_fundus
+from app.main import _process_prediction
 
 
 def run_backend_tests():
@@ -29,65 +31,77 @@ def run_backend_tests():
     synthetic_img = create_synthetic_fundus(grade=3)  # Severe DR
     assert isinstance(synthetic_img, Image.Image), "Synthetic fundus must be a PIL Image."
     assert synthetic_img.size == (512, 512), f"Expected (512, 512), got {synthetic_img.size}"
+    
+    img_byte_arr = io.BytesIO()
+    synthetic_img.save(img_byte_arr, format='JPEG')
+    img_bytes = img_byte_arr.getvalue()
     print(" -> PASSED! Generated synthetic fundus scan.")
 
-    # 2. Test Preprocessing & Green Channel CLAHE Pipeline
-    print("\n[2/5] Testing Preprocessing & Green Channel CLAHE Pipeline...")
-    tensor, preprocessed_np = prepare_tensor_from_image(synthetic_img)
-    assert tensor.shape == (1, 3, 224, 224), f"Expected tensor shape (1, 3, 224, 224), got {tensor.shape}"
-    assert preprocessed_np.shape == (224, 224, 3), f"Expected RGB shape (224, 224, 3), got {preprocessed_np.shape}"
+    # 2. Test Preprocessing & Green Channel CLAHE Pipeline (Requirement 2: 384x384)
+    print("\n[2/5] Testing Preprocessing & Green Channel CLAHE Pipeline (384x384)...")
+    tensor, preprocessed_np = preprocess_image(img_bytes)
+    assert tensor.shape == (1, 3, 384, 384), f"Expected tensor shape (1, 3, 384, 384), got {tensor.shape}"
+    assert preprocessed_np.shape == (384, 384, 3), f"Expected RGB shape (384, 384, 3), got {preprocessed_np.shape}"
     print(f" -> PASSED! Tensor shape: {tensor.shape}, Preprocessed RGB shape: {preprocessed_np.shape}")
 
-    # 3. Test Model Inference Engine & Diagnostics
-    print("\n[3/5] Testing PyTorch Model Inference Engine & Diagnostics across Grades 0-4...")
+    # 3. Test Model Inference Engine & Diagnostics (Requirement 1: EfficientNet-B4)
+    print("\n[3/5] Testing PyTorch Model Inference Engine (EfficientNet-B4)...")
     engine = DRInferenceEngine()
     for test_g in range(5):
         sample_img = create_synthetic_fundus(grade=test_g)
-        g_tensor, g_preprocessed = prepare_tensor_from_image(sample_img)
+        s_byte_arr = io.BytesIO()
+        sample_img.save(s_byte_arr, format='JPEG')
+        g_tensor, g_preprocessed = preprocess_image(s_byte_arr.getvalue())
         print(f"\n--- Testing Grade {test_g} Image ---")
         g_pred = engine.predict(g_tensor, raw_rgb_image=g_preprocessed)
         assert 0 <= g_pred['predicted_class_id'] <= 4, "Class ID out of bounds [0-4]."
         assert len(g_pred['all_class_probabilities']) == 5, "Must return 5 class probabilities."
     
-    # Store prediction for downstream test steps
     prediction = engine.predict(tensor)
     print("\n -> PASSED! PyTorch model forward pass & structured JSON verification succeeded.")
 
-    # 4. Test Grad-CAM XAI Generator
+    # 4. Test Grad-CAM XAI Generator (Requirement 3: Base64 string output)
     print("\n[4/5] Testing Grad-CAM Heatmap & Overlay Engine...")
-    overlay, heatmap, spatial_summary = generate_gradcam_overlay(
-        model=engine.model,
-        target_layer=engine.model.target_layer,
+    gradcam_b64 = generate_gradcam(
         input_tensor=tensor,
-        original_rgb=preprocessed_np,
-        target_class=prediction['predicted_class_id']
+        original_image=preprocessed_np,
+        predicted_class=prediction['predicted_class_id'],
+        model=engine.model,
+        target_layer=engine.model.target_layer
     )
-    assert overlay.shape == (224, 224, 3), f"Overlay shape mismatch: {overlay.shape}"
-    assert heatmap.shape == (224, 224, 3), f"Heatmap shape mismatch: {heatmap.shape}"
-    print(f" -> Primary Lesion Quadrant: {spatial_summary['primary_lesion_quadrant']}")
-    print(f" -> High Lesion Density Coverage: {spatial_summary['high_lesion_density_pct']}%")
-    print(" -> PASSED! Grad-CAM heatmap extraction and overlay succeeded.")
+    assert gradcam_b64.startswith("data:image/jpeg;base64,"), "Grad-CAM output must be a base64 JPEG data URI."
+    print(" -> PASSED! Grad-CAM base64 heatmap extraction succeeded.")
 
-    # 5. Test RAG Clinical Report Generator
-    print("\n[5/5] Testing RAG Clinical Report Generator...")
-    rag = RAGClinicalReportGenerator()
-    report = rag.generate_report(
-        predicted_grade=prediction['predicted_class_id'],
-        confidence=prediction['confidence_score'],
-        probabilities=prediction['all_class_probabilities'],
-        spatial_summary=spatial_summary
+    # 5. Test RAG Clinical Report Generator (Requirement 4 & Requirement 5 Endpoint Output)
+    print("\n[5/5] Testing RAG Clinical Report & Full Predict Pipeline...")
+    clinical_report = generate_clinical_report(
+        predicted_class_id=prediction['predicted_class_id'],
+        confidence_score=prediction['confidence_percentage']
     )
-    print(f" -> Diagnosis: {report['summary_header']['diagnosis']}")
-    print(f" -> Urgency: {report['summary_header']['urgency_level']}")
-    print(f" -> ICDR Criteria Matched: {report['diagnostic_reasoning']['icdr_criteria_matched']}")
-    print(f" -> Referral Timeline: {report['clinical_recommendations']['referral_timeline']}")
-    assert len(report['retrieved_guideline_citations']) > 0, "RAG must return guideline citations."
-    print(" -> PASSED! RAG clinical explanation report generated successfully.")
+    assert "progression_risk" in clinical_report
+    assert "assessment" in clinical_report
+    assert "recommendation" in clinical_report
+
+    # Test complete prediction function asynchronously
+    res = asyncio.run(_process_prediction(image_base64=None, file=None, patient_id="TEST-001") if False else _process_prediction_test(img_bytes))
+    assert "predicted_class_id" in res
+    assert "predicted_class_name" in res
+    assert "confidence_percentage" in res
+    assert "gradcam_base64" in res
+    assert "clinical_report" in res
 
     print("\n==================================================")
     print(" ALL 5 BACKEND VERIFICATION TESTS PASSED SUCCESSFULLY! ")
     print("==================================================")
 
+
+async def _process_prediction_test(img_bytes):
+    return await _process_prediction(image_base64=None, file=None, patient_id="TEST-001") if False else await _process_prediction_from_bytes(img_bytes)
+
+async def _process_prediction_from_bytes(img_bytes):
+    from fastapi import UploadFile
+    fake_file = UploadFile(filename="test.jpg", file=io.BytesIO(img_bytes))
+    return await _process_prediction(file=fake_file, patient_id="TEST-001")
 
 if __name__ == "__main__":
     run_backend_tests()

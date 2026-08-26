@@ -10,7 +10,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import logging
 
-from app.config import DR_CLASSES, DR_DESCRIPTIONS, DR_SEVERITY_COLORS
+from app.config import DR_CLASSES, DR_DESCRIPTIONS, DR_SEVERITY_COLORS, DR_PROGRESSION_RISK, DR_CLINICAL_RECOMMENDATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +171,55 @@ class RAGClinicalReportGenerator:
         }
 
         return report
+
+
+def generate_clinical_report(
+    predicted_class_id: int,
+    confidence_score: float,
+    probabilities: Optional[Dict[str, float]] = None,
+    spatial_summary: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Requirement 4 RAG-based Clinical Reporting Engine:
+    Maps prediction to a structured JSON object containing:
+      - progression_risk: e.g. Low, Moderate, Critical
+      - assessment: brief explanation of what this stage means
+      - recommendation: e.g. Urgent ophthalmic referral within 1 month
+    """
+    if probabilities is None:
+        probabilities = {DR_CLASSES[i]: (1.0 if i == predicted_class_id else 0.0) for i in range(5)}
+
+    if spatial_summary is None:
+        spatial_summary = {
+            "high_lesion_density_pct": 0.0,
+            "moderate_lesion_density_pct": 0.0,
+            "primary_lesion_quadrant": "Central Macular Region",
+            "max_intensity": 0.5,
+            "mean_intensity": 0.2
+        }
+
+    conf_val = confidence_score if confidence_score <= 1.0 else confidence_score / 100.0
+
+    generator = RAGClinicalReportGenerator()
+    full_report = generator.generate_report(
+        predicted_grade=predicted_class_id,
+        confidence=conf_val,
+        probabilities=probabilities,
+        spatial_summary=spatial_summary
+    )
+
+    progression_risk = DR_PROGRESSION_RISK.get(predicted_class_id, "Unknown")
+    assessment = full_report["diagnostic_reasoning"]["icdr_criteria_matched"]
+    recommendation = full_report["clinical_recommendations"]["referral_timeline"]
+
+    return {
+        "progression_risk": progression_risk,
+        "assessment": assessment,
+        "recommendation": recommendation,
+        "full_report": full_report,
+        "summary_header": full_report["summary_header"],
+        "diagnostic_reasoning": full_report["diagnostic_reasoning"],
+        "spatial_lesion_analysis": full_report["spatial_lesion_analysis"],
+        "clinical_recommendations": full_report["clinical_recommendations"],
+        "retrieved_guideline_citations": full_report["retrieved_guideline_citations"]
+    }

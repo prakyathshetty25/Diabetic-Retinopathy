@@ -4,13 +4,15 @@ Extracts spatial feature maps from final convolutional layer to identify visual 
 (Microaneurysms, hemorrhages, hard exudates, cotton wool spots).
 """
 
+import io
+import base64
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Union
 import logging
 
 logger = logging.getLogger(__name__)
@@ -146,3 +148,46 @@ def generate_gradcam_overlay(
     }
 
     return overlay, heatmap_rgb, spatial_summary
+
+
+def image_to_base64_jpeg(img_np: np.ndarray) -> str:
+    """Converts numpy uint8 RGB image array to base64 JPEG data URI."""
+    pil_img = Image.fromarray(img_np)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=90)
+    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64_str}"
+
+
+def generate_gradcam(
+    input_tensor: torch.Tensor,
+    original_image: Union[np.ndarray, Image.Image],
+    predicted_class: int,
+    model: nn.Module = None,
+    target_layer: nn.Module = None
+) -> str:
+    """
+    Requirement 3 Grad-CAM Integration:
+    Hooks into final convolutional layer of EfficientNet-B4 (model.features[-1]).
+    Computes gradients with respect to predicted_class score.
+    Generates heatmap, overlays onto original fundus scan, and encodes as Base64 string ("data:image/jpeg;base64,...").
+    """
+    if isinstance(original_image, Image.Image):
+        original_rgb = np.array(original_image.convert("RGB"))
+    else:
+        original_rgb = original_image
+
+    if model is None:
+        raise ValueError("model parameter must be provided to generate_gradcam.")
+    if target_layer is None:
+        target_layer = getattr(model, "target_layer", getattr(model, "features", [None])[-1])
+
+    overlay, _, _ = generate_gradcam_overlay(
+        model=model,
+        target_layer=target_layer,
+        input_tensor=input_tensor,
+        original_rgb=original_rgb,
+        target_class=predicted_class
+    )
+
+    return image_to_base64_jpeg(overlay)

@@ -7,9 +7,9 @@ from typing import Dict, List, Tuple
 # Severity scale mapping based on International Clinical Diabetic Retinopathy (ICDR) scale
 DR_CLASSES: Dict[int, str] = {
     0: "No DR",
-    1: "Mild Non-Proliferative DR",
-    2: "Moderate Non-Proliferative DR",
-    3: "Severe Non-Proliferative DR",
+    1: "Mild NPDR",
+    2: "Moderate NPDR",
+    3: "Severe NPDR",
     4: "Proliferative DR"
 }
 
@@ -45,13 +45,13 @@ DR_DESCRIPTIONS: Dict[int, str] = {
     4: "Neovascularization or vitreous/preretinal hemorrhage present."
 }
 
-# Image Preprocessing Setup (224x224 standard input resolution for ResNet50 / MobileNet)
-IMAGE_SIZE: Tuple[int, int] = (224, 224)
+# Image Preprocessing Setup (384x384 standard input resolution for EfficientNet-B4)
+IMAGE_SIZE: Tuple[int, int] = (384, 384)
 IMAGENET_MEAN: List[float] = [0.485, 0.456, 0.406]
 IMAGENET_STD: List[float] = [0.229, 0.224, 0.225]
 
 # Model Configuration
-DEFAULT_BACKBONE: str = "resnet50"
+DEFAULT_BACKBONE: str = "efficientnet_b4"
 NUM_CLASSES: int = 5
 
 # API Configuration
