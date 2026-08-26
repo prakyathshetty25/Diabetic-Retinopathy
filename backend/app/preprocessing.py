@@ -95,56 +95,39 @@ def apply_green_channel_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_g
 
 def preprocess_image(
     image_bytes_or_img: Union[bytes, Image.Image, np.ndarray],
-    target_size: Tuple[int, int] = IMAGE_SIZE
+    target_size: Tuple[int, int] = (224, 224)
 ) -> Tuple[torch.Tensor, np.ndarray]:
     """
-    Requirement 2 Preprocessing Pipeline:
-    - Explicitly converts uploaded image to RGB (Image.open(io.BytesIO(image_bytes)).convert('RGB')).
-    - Resizes to 384x384 (EfficientNet-B4 standard resolution).
-    - Applies OpenCV CLAHE to the green channel.
-    - Scales output to [0.0, 1.0] float before applying ImageNet normalization.
-    Returns:
-        (input_tensor [1, 3, H, W], preprocessed_np_rgb [H, W, 3])
+    REQUIREMENT 1: Simple Preprocessing Function
+    - Accept uploaded image bytes / PIL Image / numpy array.
+    - Convert image to RGB using PIL: Image.open(io.BytesIO(image_bytes)).convert('RGB').
+    - Resize image to standard size (224, 224).
+    - Convert to PyTorch Tensor using transforms.ToTensor().
+    - Apply standard ImageNet normalization: transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]).
+    - Add batch dimension so the tensor shape becomes (1, 3, 224, 224).
+    Returns (input_tensor, preprocessed_np_rgb).
     """
     if isinstance(image_bytes_or_img, bytes):
         pil_image = Image.open(io.BytesIO(image_bytes_or_img)).convert("RGB")
-        img_np = np.array(pil_image)
     elif isinstance(image_bytes_or_img, Image.Image):
         pil_image = image_bytes_or_img.convert("RGB")
-        img_np = np.array(pil_image)
     elif isinstance(image_bytes_or_img, np.ndarray):
-        img_np = image_bytes_or_img
-        if img_np.ndim == 2:
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
-        elif img_np.shape[2] == 4:
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
+        pil_image = Image.fromarray(image_bytes_or_img).convert("RGB")
     else:
         raise TypeError(f"Unsupported image input type: {type(image_bytes_or_img)}")
 
-    # 1. Crop FOV if applicable
-    try:
-        cropped = crop_fundus_fov(img_np)
-    except Exception as e:
-        logger.warning(f"FOV cropping failed, using original: {e}")
-        cropped = img_np
+    transform_pipeline = T.Compose([
+        T.Resize(target_size),
+        T.ToTensor(),
+        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    ])
 
-    # 2. Resize to target_size (384x384)
-    resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
+    input_tensor = transform_pipeline(pil_image).unsqueeze(0)
+    
+    resized_pil = pil_image.resize(target_size)
+    preprocessed_np = np.array(resized_pil)
 
-    # 3. Apply CLAHE on Green Channel
-    preprocessed_np = apply_green_channel_clahe(resized)
-
-    # 4. Scale to [0.0, 1.0] before applying ImageNet normalization
-    img_float = preprocessed_np.astype(np.float32) / 255.0
-
-    mean = np.array(IMAGENET_MEAN, dtype=np.float32).reshape(1, 1, 3)
-    std = np.array(IMAGENET_STD, dtype=np.float32).reshape(1, 1, 3)
-    normalized = (img_float - mean) / std
-
-    # Convert to PyTorch FloatTensor [1, 3, H, W]
-    tensor = torch.from_numpy(normalized).permute(2, 0, 1).unsqueeze(0).float()
-
-    return tensor, preprocessed_np
+    return input_tensor, preprocessed_np
 
 
 def preprocess_fundus_image(

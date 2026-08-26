@@ -128,20 +128,16 @@ async def _process_prediction(
         raise HTTPException(status_code=400, detail="Corrupt or empty image data payload.")
 
     try:
-        # 1. Preprocessing pipeline converting explicitly to RGB, 384x384, CLAHE, ImageNet norm
+        # 1. Simple Preprocessing
         tensor, preprocessed_np = preprocess_image(image_bytes)
-        print(f"[API Endpoint] Dynamically Generated Tensor Shape: {tensor.shape}")
-        print(f"[API Endpoint] Tensor Mean: {tensor.mean().item():.5f}, Tensor Std: {tensor.std().item():.5f}")
 
-        # 2. EfficientNet-B4 Model Prediction
+        # 2. Simple Model Inference (prints Input Tensor Mean, Raw Probabilities, Predicted Class Index)
         pred_result = engine.predict(tensor, raw_rgb_image=preprocessed_np)
         pred_grade = pred_result["predicted_class_id"]
         class_name = pred_result["predicted_class_name"]
         confidence_pct = float(pred_result["confidence_percentage"])
-        raw_logits = pred_result["raw_logits"]
-
-        print(f"[API Endpoint] Raw Model Logits: {raw_logits}")
-        print(f"[API Endpoint] Predicted Class: {pred_grade} ({class_name}), Confidence: {confidence_pct}%")
+        risk_level = pred_result["progression_risk"]
+        recommendation_text = pred_result["recommendation"]
 
         # 3. Grad-CAM XAI spatial lesion map extraction
         gradcam_b64 = generate_gradcam(
@@ -172,18 +168,19 @@ async def _process_prediction(
         preprocessed_b64 = image_to_base64(Image.fromarray(preprocessed_np))
         heatmap_b64 = image_to_base64(Image.fromarray(heatmap_rgb))
 
-        # 5. Expected API JSON structure + UI compatibility
+        # 5. Requirement 5 JSON Response + UI dashboard compatibility
         return {
             "predicted_class_id": pred_grade,
             "predicted_class_name": class_name,
             "confidence_percentage": confidence_pct,
-            "gradcam_base64": gradcam_b64,
-            "clinical_report": clinical_report,
+            "progression_risk": risk_level,
+            "recommendation": recommendation_text,
             # Additional UI dashboard compatibility fields:
             "confidence_score": pred_result["confidence"],
             "all_class_probabilities": pred_result["probabilities"],
-            "progression_risk": pred_result["progression_risk"],
-            "clinical_recommendation": pred_result["clinical_recommendation"],
+            "clinical_recommendation": recommendation_text,
+            "gradcam_base64": gradcam_b64,
+            "clinical_report": clinical_report,
             "patient_id": patient_id,
             "prediction": pred_result,
             "spatial_summary": spatial_summary,

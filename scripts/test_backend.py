@@ -37,15 +37,15 @@ def run_backend_tests():
     img_bytes = img_byte_arr.getvalue()
     print(" -> PASSED! Generated synthetic fundus scan.")
 
-    # 2. Test Preprocessing & Green Channel CLAHE Pipeline (Requirement 2: 384x384)
-    print("\n[2/5] Testing Preprocessing & Green Channel CLAHE Pipeline (384x384)...")
+    # 2. Test Preprocessing & Green Channel CLAHE Pipeline (Requirement 1: 224x224)
+    print("\n[2/5] Testing Preprocessing Pipeline (224x224)...")
     tensor, preprocessed_np = preprocess_image(img_bytes)
-    assert tensor.shape == (1, 3, 384, 384), f"Expected tensor shape (1, 3, 384, 384), got {tensor.shape}"
-    assert preprocessed_np.shape == (384, 384, 3), f"Expected RGB shape (384, 384, 3), got {preprocessed_np.shape}"
+    assert tensor.shape == (1, 3, 224, 224), f"Expected tensor shape (1, 3, 224, 224), got {tensor.shape}"
+    assert preprocessed_np.shape == (224, 224, 3), f"Expected RGB shape (224, 224, 3), got {preprocessed_np.shape}"
     print(f" -> PASSED! Tensor shape: {tensor.shape}, Preprocessed RGB shape: {preprocessed_np.shape}")
 
-    # 3. Test Model Inference Engine & Diagnostics (Requirement 1: EfficientNet-B4)
-    print("\n[3/5] Testing PyTorch Model Inference Engine (EfficientNet-B4)...")
+    # 3. Test Model Inference Engine & Diagnostics (Requirement 2 & 4)
+    print("\n[3/5] Testing PyTorch Model Inference Engine (ResNet50)...")
     engine = DRInferenceEngine()
     for test_g in range(5):
         sample_img = create_synthetic_fundus(grade=test_g)

@@ -109,43 +109,31 @@ class DRInferenceEngine:
         self.model.eval()
         with torch.no_grad():
             logits = self.model(input_tensor)
-            probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+            probs = torch.softmax(logits, dim=1).squeeze(0)
 
-        pred_class_id = int(np.argmax(probs))
-        confidence = float(probs[pred_class_id])
+        pred_class_id = int(torch.argmax(probs).item())
+        confidence = float(probs[pred_class_id].item())
+        prob_list = probs.cpu().numpy().tolist()
         raw_logits_list = logits.squeeze(0).cpu().numpy().tolist()
 
-        # Dynamic Tensor & Output Console Diagnostic Prints (Requirements 1 & Section Diagnostics)
-        tensor_mean = input_tensor.mean().item()
-        tensor_std = input_tensor.std().item()
-        print(f"[Model Inference] Input Image Shape: {input_tensor.shape}")
-        print(f"[Model Inference] Tensor Mean: {tensor_mean:.5f}, Tensor Std: {tensor_std:.5f}")
-        print(f"[Model Inference] Tensor Min/Max: ({input_tensor.min().item():.3f}, {input_tensor.max().item():.3f})")
-        print(f"[Model Inference] Raw Model Logits: {raw_logits_list}")
-        print(f"[Model Inference] Softmax Probabilities: {probs.tolist()}")
-        print(f"[Model Inference] Predicted Class Index: {pred_class_id} ({DR_CLASSES[pred_class_id]})")
+        # REQUIREMENT 4: CONSOLE LOGGING (FOR DEBUGGING)
+        print("Input Tensor Mean:", input_tensor.mean().item())
+        print("Raw Probabilities:", prob_list)
+        print("Predicted Class Index:", pred_class_id)
 
         logger.info(f"--- ML MODEL INFERENCE DIAGNOSTICS ---")
-        logger.info(f"Input Image Shape: {input_tensor.shape} | Min/Max: ({input_tensor.min().item():.3f}, {input_tensor.max().item():.3f})")
+        logger.info(f"Input Image Shape: {input_tensor.shape} | Tensor Mean: {input_tensor.mean().item():.5f}")
         logger.info(f"Raw Model Logits: {raw_logits_list}")
-        logger.info(f"Softmax Probabilities: {probs.tolist()}")
-        logger.info(f"Argmax Class Index: {pred_class_id}")
-        logger.info(f"Softmax Confidence Score: {confidence * 100:.2f}%")
+        logger.info(f"Raw Probabilities: {prob_list}")
+        logger.info(f"Predicted Class Index: {pred_class_id} ({DR_CLASSES[pred_class_id]})")
         logger.info(f"---------------------------------------")
 
         class_probabilities = {
-            DR_CLASSES[i]: float(prob) for i, prob in enumerate(probs)
+            DR_CLASSES[i]: float(prob) for i, prob in enumerate(prob_list)
         }
 
         progression_risk = DR_PROGRESSION_RISK.get(pred_class_id, "Unknown")
         clinical_recommendation = DR_CLINICAL_RECOMMENDATIONS.get(pred_class_id, "Consult ophthalmologist.")
-
-        lesion_metrics = None
-        if raw_rgb_image is not None:
-            try:
-                lesion_metrics = extract_retinal_lesion_features(raw_rgb_image)
-            except Exception as e:
-                logger.warning(f"Lesion feature extraction error: {e}")
 
         return {
             "predicted_class_id": pred_class_id,
@@ -156,9 +144,9 @@ class DRInferenceEngine:
             "probabilities": class_probabilities,
             "all_class_probabilities": class_probabilities,
             "progression_risk": progression_risk,
+            "recommendation": clinical_recommendation,
             "clinical_recommendation": clinical_recommendation,
             "raw_logits": raw_logits_list,
-            "lesion_metrics": lesion_metrics,
             "device": str(self.device)
         }
 

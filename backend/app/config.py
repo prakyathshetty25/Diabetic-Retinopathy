@@ -14,19 +14,19 @@ DR_CLASSES: Dict[int, str] = {
 }
 
 DR_PROGRESSION_RISK: Dict[int, str] = {
-    0: "Low (Annual screening)",
-    1: "Mild (Monitor 6-12 months)",
-    2: "Moderate (Referral within 3-6 months)",
-    3: "High (Urgent ophthalmic referral)",
-    4: "Critical (Immediate intervention required)"
+    0: "Low",
+    1: "Mild",
+    2: "Moderate",
+    3: "High",
+    4: "Critical"
 }
 
 DR_CLINICAL_RECOMMENDATIONS: Dict[int, str] = {
-    0: "Routine annual dilated eye examination and glycemic control monitoring.",
-    1: "Follow-up dilated fundus exam within 6 to 12 months. Optimize blood glucose and blood pressure.",
-    2: "Follow-up dilated fundus exam within 3 to 6 months. Consider OCT imaging to evaluate macular edema.",
-    3: "Urgent referral to Retina Specialist / Ophthalmologist within 2 to 4 weeks. Evaluate for PRP laser or Anti-VEGF.",
-    4: "Emergency referral to Retina Specialist within 24-48 hours. Urgent Anti-VEGF, PRP photocoagulation, or vitrectomy evaluation."
+    0: "Routine annual eye screening.",
+    1: "Follow-up screening in 6-12 months.",
+    2: "Ophthalmologist referral within 3-6 months.",
+    3: "Urgent ophthalmic consultation within 1 month.",
+    4: "Immediate specialized laser/surgical intervention."
 }
 
 DR_SEVERITY_COLORS: Dict[int, str] = {
@@ -45,13 +45,13 @@ DR_DESCRIPTIONS: Dict[int, str] = {
     4: "Neovascularization or vitreous/preretinal hemorrhage present."
 }
 
-# Image Preprocessing Setup (384x384 standard input resolution for EfficientNet-B4)
-IMAGE_SIZE: Tuple[int, int] = (384, 384)
+# Image Preprocessing Setup (224x224 standard input resolution for ResNet50)
+IMAGE_SIZE: Tuple[int, int] = (224, 224)
 IMAGENET_MEAN: List[float] = [0.485, 0.456, 0.406]
 IMAGENET_STD: List[float] = [0.229, 0.224, 0.225]
 
 # Model Configuration
-DEFAULT_BACKBONE: str = "efficientnet_b4"
+DEFAULT_BACKBONE: str = "resnet50"
 NUM_CLASSES: int = 5
 
 # API Configuration
